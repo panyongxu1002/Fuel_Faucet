@@ -2,22 +2,28 @@ use axum::{extract::Json, routing::get, routing::post, Router};
 use dotenv::dotenv;
 use fuels::accounts::wallet::Wallet;
 use fuels::{crypto::SecretKey, prelude::*};
+use reqwest::Error;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::str::FromStr;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct TransferRes {
-    from: String,
-    to: String,
-    amount: u64,
-    asset_id: String,
+    success: bool,
     tx_id: String,
+    explorer_url: String,
 }
 #[derive(Debug, Serialize, Deserialize)]
 struct TransferPost {
-  receiver: String,
-  amount: u64,
+    address: String,
+    network: String,
+}
+#[derive(Debug, Serialize, Deserialize)]
+struct Setting {
+    amount: String,
+    frequency: String,
+    alarm: String,
+    chain_type: String,
 }
 
 #[warn(unused_must_use)]
@@ -28,7 +34,7 @@ async fn transfer(data: Json<TransferPost>) -> Json<TransferRes> {
 
     println!("data: {:#?}", data);
     let key = env::var("KEY").expect("KEY 未设置");
-    let provider = Provider::connect("beta-5.fuel.network").await.unwrap();
+    let provider = Provider::connect(&data.network).await.unwrap();
 
     // Setup a private key
     let secret = SecretKey::from_str(&key).unwrap();
@@ -39,34 +45,62 @@ async fn transfer(data: Json<TransferPost>) -> Json<TransferRes> {
     // Get the wallet address. Used later with the faucet
     println!("{}", wallet.address().to_string());
 
+   
+    let url = env::var("SETTING_URL").expect("SETTING_URL 未设置");
+    let response = reqwest::get(&url).await.unwrap();
+
+    let setting: Setting = response.json().await.unwrap();
+    println!("setting: {:#?}", setting);
+
     let asset_id: AssetId = BASE_ASSET_ID;
     let balance: u64 = wallet.get_asset_balance(&asset_id).await.unwrap();
 
     println!("balance: {}, asset_id: {} ", balance, asset_id);
 
     // const NUM_ASSETS: u64 = 0;
-    let amount: u64 = data.amount;
+    let amount: u64 = setting.amount.to_owned().parse().unwrap();
+    // let amount: u64 = 10000000000;
+
     // const NUM_COINS: u64 = 1;
     // let (coins, _) = setup_multiple_assets_coins(wallet.address(), NUM_ASSETS, NUM_COINS, AMOUNT);
 
-    let receiver =
-        Bech32Address::from_str(&data.receiver)
-            .unwrap();
+    let receiver = Bech32Address::from_str(&data.address).unwrap();
 
-    let (_tx_id, _receipts) = wallet
+    // let (_tx_id, _receipts) = wallet
+    //     .transfer(&receiver, amount, asset_id, TxPolicies::default())
+    //     .await
+    //     .unwrap();
+
+    let result = wallet
         .transfer(&receiver, amount, asset_id, TxPolicies::default())
-        .await
-        .unwrap();
+        .await;
 
-    println!("_tx_id: {}, _receipts: {:#?} ", _tx_id, _receipts);
+    match result {
+        Ok((_tx_id, _receipts)) => {
+            // 处理成功的结果
+            println!("Transaction successful: {:?}", _tx_id);
+            Json(TransferRes {
+                success: true,
+                tx_id: _tx_id.to_string(),
+                explorer_url: explorer_url(&_tx_id.to_string()),
+            })
+        }
+        Err(e) => {
+            // 处理错误
+            eprintln!("Transaction failed: {:?}", e);
+            Json(TransferRes {
+                success: false,
+                tx_id: String::new(),
+                explorer_url: String::new(),
+            })
+        }
+    }
+}
 
-    Json(TransferRes {
-        from: wallet.address().to_string(),
-        to: receiver.to_string(),
-        amount: amount,
-        asset_id: asset_id.to_string(),
-        tx_id: _tx_id.to_string(),
-    })
+fn explorer_url(tx_id: &str) -> String {
+    let base_url = "https://app.fuel.network/tx/0x";
+    let path = "/simple";
+    format!("{}{}{}", base_url, tx_id, path)
 }
 
 #[tokio::main]
@@ -74,13 +108,13 @@ async fn main() {
     // 加载 .env 文件
     dotenv().ok();
 
-    // setup().await;
-
     let app = Router::new()
         .route("/", get(|| async { "Hello, World!" }))
-        .route("/transfer", post(transfer));
+        .route("/fuel/request", post(transfer));
 
     // run it with hyper on localhost:3000
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:6004")
+        .await
+        .unwrap();
     axum::serve(listener, app).await.unwrap();
 }
